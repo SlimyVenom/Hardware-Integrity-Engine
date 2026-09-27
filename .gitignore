@@ -1,0 +1,26 @@
+# Vivado generated files
+.Xil/
+.cache/
+.hw/
+.ip_user_files/
+.sim/
+.runs/
+
+# Vivado project metadata
+*.jou
+*.log
+*.str
+*.pb
+
+# Simulation / waveform output
+*.wdb
+*.vcd
+
+# Temporary files
+*.tmp
+*.bak
+*~
+
+# OS generated files
+.DS_Store
+Thumbs.db
