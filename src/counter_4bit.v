@@ -1,4 +1,23 @@
 `timescale 1ns / 1ps
+//////////////////////////////////////////////////////////////////////////////////
+// Company: 
+// Engineer: 
+// 
+// Create Date: 09/07/2026 01:39:28 PM
+// Design Name: 
+// Module Name: counter_4bit
+// Project Name: 
+// Target Devices: 
+// Tool Versions: 
+// Description: 
+// 
+// Dependencies: 
+// 
+// Revision:
+// Revision 0.01 - File Created
+// Additional Comments:
+// 
+//////////////////////////////////////////////////////////////////////////////////
 
 module counter_4bit(
     input [3:0] x,
@@ -15,4 +34,3 @@ module counter_4bit(
     full_adder F23(.a(c01[1]), .b(c23[1]), .cin(carry), .sum(count[1]), .cout(count[2]));
     
 endmodule
-
