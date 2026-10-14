@@ -1,10 +1,7 @@
 `timescale 1ns / 1ps
 
-module hardware_integrity_engine_tb();
+module secded_wrapper_tb;
 
-    // ============================================================
-    // Testbench signals
-    // ============================================================
     reg         clk;
     reg  [15:0] sw;
     wire [15:0] led;
@@ -12,10 +9,12 @@ module hardware_integrity_engine_tb();
     wire [6:0]  seg;
     wire        dp;
 
-    // ============================================================
-    // Instantiate the Design Under Test (DUT)
-    // ============================================================
-    hardware_integrity_engine UUT(
+    integer error_count;
+    integer d;
+    integer j;
+    integer k;
+
+    secded_wrapper UUT (
         .clk(clk),
         .sw(sw),
         .led(led),
@@ -24,157 +23,152 @@ module hardware_integrity_engine_tb();
         .dp(dp)
     );
 
-    // ============================================================
-    // 100 MHz clock generation (10ns period)
-    // ============================================================
     always #5 clk = ~clk;
 
-    // ============================================================
-    // Expected values (behavioral reference model)
-    // ============================================================
-    reg [7:0] expected_error_pattern;
-    reg [3:0] expected_error_distance;
-    reg       expected_exact_match;
-    reg       expected_integrity_valid;
+    // Reference model inputs
+    wire [3:0] din;
+    wire [7:0] error_mask;
 
-    integer error_count = 0;
-    integer test_count  = 0;
+    assign din        = sw[3:0];
+    assign error_mask = sw[11:4];
 
-    // ============================================================
-    // Test procedure
-    // ============================================================
+    // Independent behavioral SECDED encoder
+    wire p1;
+    wire p2;
+    wire p4;
+    wire p0;
+
+    assign p1 = din[3] ^ din[2] ^ din[0];
+    assign p2 = din[3] ^ din[1] ^ din[0];
+    assign p4 = din[2] ^ din[1] ^ din[0];
+
+    assign p0 = p1 ^ p2 ^ p4 ^
+                din[3] ^ din[2] ^ din[1] ^ din[0];
+
+    wire [7:0] expected_codeword;
+    wire [7:0] received_codeword;
+
+    assign expected_codeword = {
+        p0, din[0], din[1], din[2],
+        p4, din[3], p2, p1
+    };
+
+    assign received_codeword = expected_codeword ^ error_mask;
+
     initial begin
-        clk = 0;
-        sw  = 16'b0;
+        clk = 1'b0;
+        sw = 16'b0;
+        error_count = 0;
 
-        // Header
-        $display("============================================================");
-        $display("     Testing Hardware Integrity Engine");
-        $display("============================================================");
-        $display("Testing ALL 65,536 reference/received data pairs...");
-        $display("For each pair, testing ALL 16 threshold values (0-15)");
-        $display("Total tests: 1,048,576");
-        $display("============================================================");
-        $display("");
-
+        // Allow the design to settle before testing.
         #20;
 
-        // ============================================================
-        // EXHAUSTIVE TEST: all reference values, received values,
-        // and thresholds
-        // ============================================================
-        for (integer reference = 0; reference < 256; reference = reference + 1) begin
-            for (integer received = 0; received < 256; received = received + 1) begin
+        $display("========================================");
+        $display("SECDED Wrapper Testbench");
+        $display("Testing 16 datawords, 8 single-bit");
+        $display("errors, and 28 double-bit errors");
+        $display("========================================");
 
-                // ----------------------------------------------------
-                // Step 1: Capture reference data (SW8 = 0)
-                // ----------------------------------------------------
-                sw = {8'b0, 1'b0, reference[7:0]};
-                #10;
+        for (d = 0; d < 16; d = d + 1) begin
 
-                // ----------------------------------------------------
-                // Step 2: Capture received data (SW8 = 1)
-                // ----------------------------------------------------
-                sw = {8'b0, 1'b1, received[7:0]};
-                #10;
+            // ----------------------------------------
+            // Test 1: No error
+            // ----------------------------------------
 
-                // ----------------------------------------------------
-                // Step 3: Test all 16 thresholds
-                // ----------------------------------------------------
-                for (integer threshold = 0;
-                     threshold < 16;
-                     threshold = threshold + 1) begin
+            sw = {4'b0000, 8'b00000000, d[3:0]};
+            #20;
 
-                    sw[12:9] = threshold[3:0];
-                    #10;
+            if (led[7:0] !== expected_codeword) begin
+                error_count = error_count + 1;
+                $display(
+                    "FAIL no-error: data=%0d corrected=%b expected=%b",
+                    d, led[7:0], expected_codeword
+                );
+            end
 
-                    test_count = test_count + 1;
+            if ({led[11], led[10], led[9], led[8]} !== 4'b1001) begin
+                error_count = error_count + 1;
+                $display(
+                    "FAIL no-error status: data=%0d status=%b%b%b%b",
+                    d, led[11], led[10], led[9], led[8]
+                );
+            end
 
-                    // Compute expected values (behavioral reference model)
-                    expected_error_pattern =
-                        reference[7:0] ^ received[7:0];
+            // ----------------------------------------
+            // Test 2: Every single-bit error
+            // ----------------------------------------
 
-                    expected_error_distance = 0;
+            for (j = 0; j < 8; j = j + 1) begin
 
-                    for (integer i = 0; i < 8; i = i + 1) begin
-                        expected_error_distance =
-                            expected_error_distance + expected_error_pattern[i];
-                    end
+                sw = {
+                    4'b0000,
+                    (8'b00000001 << j),
+                    d[3:0]
+                };
 
-                    expected_exact_match =
-                        (expected_error_distance == 0) ? 1'b1 : 1'b0;
+                #20;
 
-                    expected_integrity_valid =
-                        (expected_error_distance <= threshold) ? 1'b1 : 1'b0;
+                // A single-bit error must be corrected.
+                if (led[7:0] !== expected_codeword) begin
+                    error_count = error_count + 1;
+                    $display(
+                        "FAIL single-error: data=%0d bit=%0d corrected=%b expected=%b",
+                        d, j + 1, led[7:0], expected_codeword
+                    );
+                end
 
-                    // ----------------------------------------------------
-                    // Verify all outputs
-                    // ----------------------------------------------------
-                    if ((led[7:0] == expected_error_pattern) &&
-                        (led[15]  == expected_exact_match) &&
-                        (led[14]  == expected_integrity_valid)) begin
-                        // PASS - silently continue
-                    end else begin
-                        // FAIL - print details
-                        error_count = error_count + 1;
-
-                        $display("============================================================");
-                        $display("ERROR DETECTED!");
-                        $display("Reference = %d (0x%h)", reference, reference);
-                        $display("Received  = %d (0x%h)", received, received);
-                        $display("Threshold = %d", threshold);
-
-                        $display(
-                            "Expected: error_pattern=%b exact_match=%d integrity_valid=%d (distance=%d)",
-                            expected_error_pattern,
-                            expected_exact_match,
-                            expected_integrity_valid,
-                            expected_error_distance
-                        );
-
-                        $display(
-                            "Got:      error_pattern=%b exact_match=%d integrity_valid=%d",
-                            led[7:0],
-                            led[15],
-                            led[14]
-                        );
-
-                        $display("============================================================");
-                    end
+                // Expected status:
+                // data_valid=1, double_error=0,
+                // single_error_corrected=1, no_error=0.
+                if ({led[11], led[10], led[9], led[8]} !== 4'b1010) begin
+                    error_count = error_count + 1;
+                    $display(
+                        "FAIL single-error status: data=%0d bit=%0d status=%b%b%b%b",
+                        d, j + 1, led[11], led[10], led[9], led[8]
+                    );
                 end
             end
 
-            // Progress indicator every 32 reference values
-            if (reference % 32 == 0) begin
-                $display(
-                    "Progress: reference = %0d/255, tests run = %0d, errors = %0d",
-                    reference,
-                    test_count,
-                    error_count
-                );
+            // ----------------------------------------
+            // Test 3: Every double-bit error
+            // ----------------------------------------
+
+            for (j = 0; j < 8; j = j + 1) begin
+                for (k = j + 1; k < 8; k = k + 1) begin
+
+                    sw = {
+                        4'b0000,
+                        ((8'b00000001 << j) |
+                         (8'b00000001 << k)),
+                        d[3:0]
+                    };
+
+                    #20;
+
+                    // Expected status:
+                    // data_valid=0, double_error=1,
+                    // single_error_corrected=0, no_error=0.
+                    if ({led[11], led[10], led[9], led[8]} !== 4'b0100) begin
+                        error_count = error_count + 1;
+                        $display(
+                            "FAIL double-error status: data=%0d bits=%0d,%0d status=%b%b%b%b",
+                            d, j + 1, k + 1,
+                            led[11], led[10], led[9], led[8]
+                        );
+                    end
+                end
             end
         end
 
-        // ============================================================
-        // Final Summary
-        // ============================================================
-        $display("");
-        $display("============================================================");
-        $display("                    TEST COMPLETE");
-        $display("============================================================");
-        $display("Total tests: %0d", test_count);
-        $display("Errors:      %0d", error_count);
-        $display("");
+        $display("========================================");
 
-        if (error_count == 0) begin
-            $display("ALL TESTS PASSED!");
-            $display("All %0d test cases verified successfully!", test_count);
-        end else begin
-            $display("%0d TESTS FAILED!", error_count);
-            $display("Please check the errors above.");
-        end
+        if (error_count == 0)
+            $display("ALL WRAPPER TESTS PASSED");
+        else
+            $display("%0d FAILURES DETECTED", error_count);
 
-        $display("============================================================");
+        $display("========================================");
+
         $finish;
     end
 
