@@ -1,242 +1,255 @@
-# FPGA Hardware Data Integrity & Bit-Error Detection Engine
+# FPGA Hardware Integrity and SECDED Error-Correction Engine
 
 ## Overview
 
-This project implements a modular 8-bit Hamming-distance and threshold-comparison engine in Verilog HDL and deploys it on a Digilent Basys 3 FPGA.
+This project implements a modular hardware data-integrity engine in Verilog HDL for the Digilent Basys 3 FPGA board. It combines an 8-bit Hamming-distance monitor with a Single Error Correction, Double Error Detection (SECDED) encoder and decoder.
 
-The design accepts an 8-bit reference value, an 8-bit received value, and a programmable 4-bit integrity threshold and produces:
+The system accepts a 4-bit data value and an 8-bit error mask. The encoder generates an 8-bit SECDED codeword, and the error mask introduces simulated bit flips into that codeword. The decoder then analyzes the received codeword, corrects supported single-bit errors, and detects double-bit errors.
 
-- **Error pattern:** bitwise XOR of the reference and received values
-- **Error error_distance:** number of `1` bits in the error pattern
-- **Exact match:** whether the reference and received values are identical
-- **Integrity valid:** whether the error error_distance is less than or equal to the supplied threshold
+The design provides:
 
-The RTL is organized hierarchically using reusable counters, comparators, a multiplexer, a display controller, and a top-level hardware integrity engine.
+- **SECDED encoding:** Converts four data bits into an eight-bit codeword containing Hamming parity bits and an overall parity bit.
+- **Error injection:** XORs a programmable eight-bit error mask with the encoded codeword.
+- **Error classification:** Uses the syndrome and overall parity to distinguish no-error, single-bit-error, and double-bit-error cases.
+- **Single-bit correction:** Corrects a single flipped bit in the received codeword.
+- **Double-bit detection:** Flags detected double-bit errors and marks the decoded data as invalid.
+- **Hamming-distance monitoring:** Counts the number of differing bits between the transmitted and received codewords.
+- **Hardware visualization:** Displays the input data, decoder output, syndrome, and error weight on the Basys 3 seven-segment display.
+
+The design is a hardware SECDED and integrity-monitoring primitive. It is not a complete cryptographic or authentication system.
 
 ## Architecture
 
-The design is divided into the following modules.
+The design is organized into reusable Verilog modules, with `secded_wrapper` as the top-level module.
 
 ### 1. Full Adder
 
-The full adder accepts three inputs, `a`, `b`, and `cin`, and produces `sum` and `cout`.
+The `full_adder` module accepts three one-bit inputs, `a`, `b`, and `cin`, and produces `sum` and `cout`.
 
 The sum is computed using XOR operations. The carry output is asserted when at least two of the three inputs are `1`.
 
-### 2. 2-bit Counter
+### 2. Population Counters
 
-The 2-bit counter counts the number of `1`s in two input bits, `a` and `b`.
+The population-count logic is implemented hierarchically.
 
-The output can therefore represent `0`, `1`, or `2`.
+- `counter_2bit` counts the number of set bits in a two-bit input.
+- `counter_4bit` combines two two-bit counters and the required addition logic to count set bits across four input bits.
+- `counter_8bit` combines two four-bit counters to count the set bits in an eight-bit input.
 
-- The MSB is computed as `a XOR b`.
-- The LSB is computed as `a AND b`.
+The eight-bit counter is used to calculate the Hamming distance between the transmitted and received codewords.
 
-### 3. 4-bit Counter
+### 3. Comparators
 
-The 4-bit counter is constructed hierarchically from two 2-bit counters and full adders.
+The design contains two comparator modules.
 
-The four input bits are divided into two groups of two. Each 2-bit counter computes the number of set bits in its group, and the resulting counts are added using full adders.
+- `comparator_8bit` determines whether two eight-bit values are equal.
+- `comparator_4bit` compares the calculated Hamming distance with a four-bit threshold and determines whether the distance is less than or equal to that threshold.
 
-### 4. 8-bit Counter
+These modules provide the comparison logic used by the Hamming-distance monitor.
 
-The 8-bit counter extends the same hierarchical approach.
+### 4. SECDED Encoder
 
-Two 4-bit counters process the two halves of the 8-bit input, and their results are combined using full adders to obtain the total number of set bits.
+The `secded_encoder` module converts four data bits into an eight-bit extended Hamming codeword.
 
-This counter is used as the population-count stage of the Hamming-distance datapath.
+The codeword contains three Hamming parity bits, four data bits, and one overall parity bit. The parity equations are arranged so that the first seven bits form a Hamming code and the eighth bit provides even overall parity.
 
-### 5. 8-bit Comparator
+The resulting codeword is passed to the error-injection stage.
 
-The 8-bit comparator determines whether two 8-bit values are equal.
+### 5. Error Injection and Hamming-Distance Monitoring
 
-Each corresponding pair of bits is compared using XOR. The results are combined so that the final equality output is asserted only when no corresponding bits differ.
+The `secded_system` module XORs the encoded codeword with the eight-bit `error_mask`:
 
-### 6. 4-bit Comparator
+`received_codeword = transmitted_codeword XOR error_mask`
 
-The 4-bit comparator compares the calculated Hamming error_distance against the supplied threshold.
+A zero bit in the mask leaves the corresponding transmitted bit unchanged. A one bit flips that bit.
 
-It determines whether:
+The `hamming_distance8` module compares the transmitted and received codewords. It calculates the XOR difference, counts the differing bits, checks equality, and compares the error distance with a threshold of one.
 
-The comparison checks whether the error distance is less than or equal to the supplied threshold.
+This monitor reports the number of injected bit errors independently of the SECDED decoder's error classification.
 
-The comparison tracks equality and whether the error_distance is greater than the threshold, with the most significant differing bit determining the result.
+### 6. SECDED Decoder
 
-### 7. Hamming-Distance Engine
+The `secded_decoder` module analyzes the received eight-bit codeword using two values:
 
-The main combinational datapath combines the counter and comparator modules.
+- **Syndrome:** The three-bit result of the Hamming parity checks. It identifies a candidate bit position when the parity pattern indicates a single-bit error.
+- **Overall parity:** The XOR of all eight received bits, used alongside the syndrome to distinguish error classes.
 
-For input values `reference_data` and `received_data`:
+The decoder uses the syndrome and overall parity to classify the received codeword.
 
-For the two inputs, the error pattern is the bitwise XOR of `reference_data` and `received_data`. The error distance is the number of set bits in that error pattern, and `exact_match` is true when the two values are identical.
+| Syndrome | Overall parity | Classification |
+|---|---|---|
+| Zero | Even parity | No error detected |
+| Nonzero | Odd parity | Single-bit error in positions 1–7 |
+| Zero | Odd parity | Single-bit error in the overall parity bit |
+| Nonzero | Even parity | Double-bit error detected |
 
-The error_distance is then compared with the programmable threshold:
+For a classified single-bit error, the decoder generates a correction mask and XORs it with the received codeword. The four original data bits are then extracted from the corrected codeword.
 
-The integrity status is valid when the calculated error distance is less than or equal to the supplied threshold.
+For a detected double-bit error, `double_error_detected` is asserted and `data_valid` is deasserted.
 
-### 8. 8-bit Multiplexer
+SECDED guarantees correction of a single-bit error and detection of a double-bit error under its standard assumptions. It does not guarantee correct classification of arbitrary errors involving three or more flipped bits; some higher-order patterns can be misclassified.
 
-The multiplexer accepts two 8-bit inputs and a select signal and forwards one of the inputs to its output.
+### 7. System Integration
 
-It is used by the hardware integrity engine to select between the data input and the previously captured reference or received value.
+The `secded_system` module connects the encoder, error-injection stage, Hamming-distance monitor, and decoder.
+
+Its principal data path is:
+
+1. Accept four input data bits.
+2. Encode them into an eight-bit SECDED codeword.
+3. Apply the eight-bit error mask.
+4. Calculate the Hamming distance between the transmitted and received codewords.
+5. Decode the received codeword.
+6. Produce the corrected codeword, decoded data, syndrome, error classification flags, and data-valid status.
+
+The SECDED datapath is combinational. The sequential logic required for display refresh is contained in the display controller.
+
+### 8. Top-Level Wrapper
+
+The `secded_wrapper` module connects the internal SECDED system to the Basys 3 board interface.
+
+The wrapper maps switches to the input data and error mask, routes the corrected codeword and status flags to LEDs, and connects the display controller to the four-digit seven-segment display.
+
+The display presents four values:
+
+- Input data
+- Decoded output data, or a dash when the data is invalid
+- Syndrome
+- Error weight
+
+The wrapper also ties the unused upper four LEDs to zero.
 
 ### 9. Display Controller
 
-The display controller drives the Basys 3 four-digit seven-segment display.
+The `display_controller` module drives the Basys 3 four-digit seven-segment display.
 
-It rapidly switches between display digits using a refresh counter so that the multiplexed display appears steady to a human observer.
+It uses a refresh counter and an active-display selector to multiplex the four digits. The five-bit digit inputs support hexadecimal values and a dash indication for invalid decoded data.
 
-The controller contains the sequential logic required for digit refresh and active-display selection, along with the combinational digit and segment decoding logic.
-
-### 10. Hardware Integrity Engine
-
-The top-level hardware integrity engine integrates:
-
-- reference and received data capture registers
-- 8-bit multiplexers
-- the Hamming-distance engine
-- the display controller
-- LED outputs
-- seven-segment display outputs
-
-The engine captures the reference and received 8-bit values into registers and uses the multiplexer select signal to control which value is captured.
-
-The resulting error pattern, exact-match status, and integrity-valid status are routed to the LEDs, while the calculated error error_distance is displayed on the seven-segment display.
-
-## Data Path
-
-The central computation can be summarized as:
-
-The main datapath takes inputs A and B, computes their bitwise XOR, counts the differing bits to obtain the error distance, and compares that value with the supplied threshold.
-
-A separate equality comparator evaluates:
-
-The equality check compares `reference_data` with `received_data`.
-
-The hardware integrity engine adds the data-capture and display logic around this combinational datapath.
+The display controller contains the design's sequential state: a 17-bit refresh counter and a two-bit active-display selector. Digit selection, segment decoding, and anode control are implemented using combinational logic.
 
 ## FPGA Interface
 
-The design is intended for the Digilent Basys 3 FPGA board.
+The design targets the Digilent Basys 3 FPGA board and uses its 100 MHz clock.
 
 ### Inputs
 
 | Interface | Purpose |
 |---|---|
-| `SW[7:0]` | 8-bit data value |
-| `SW[8]` | Reference/received data select |
-| `SW[12:9]` | 4-bit integrity threshold |
 | `clk` | 100 MHz board clock |
+| `SW[3:0]` | Four-bit input data |
+| `SW[11:4]` | Eight-bit error-injection mask |
+| `SW[15:12]` | Unused by the current wrapper |
 
 ### Outputs
 
 | Interface | Purpose |
 |---|---|
-| `LED[7:0]` | Error pattern |
-| `LED[14]` | Integrity-valid indication |
-| `LED[15]` | Exact-match indication |
-| Seven-segment display | Displays the computed result |
-| Anodes / segment lines | Seven-segment display control |
+| `LED[7:0]` | Corrected codeword |
+| `LED[8]` | No-error indication |
+| `LED[9]` | Single-error-corrected indication |
+| `LED[10]` | Double-error-detected indication |
+| `LED[11]` | Decoded-data validity |
+| `LED[15:12]` | Tied to zero |
+| `an[3:0]` | Seven-segment digit anodes |
+| `seg[6:0]` | Seven-segment outputs |
+| `dp` | Decimal-point output |
 
-The Basys 3 pin assignments are defined in the accompanying Xilinx Design Constraints (`.xdc`) file.
+The pin assignments are defined in `constraints/basys3.xdc`. The wrapper is the intended top module for synthesis and implementation.
 
 ## Verification
 
-The design was verified using a self-contained behavioral testbench.
+The SECDED wrapper testbench is designed to exercise the complete data and error-classification path.
 
-The testbench uses an independent behavioral reference model to calculate the expected outputs and compare them against the Design Under Test (DUT).
+For each of the 16 possible four-bit input values, it tests:
 
-### Exhaustive test space
+- One no-error case.
+- All eight possible single-bit error positions.
+- All 28 possible pairs of bit positions for double-bit errors.
 
-There are:
+This produces the following test space:
 
-The exhaustive test space contains 256 possible reference values, 256 possible received values, and 16 possible threshold values, giving a total of 1,048,576 test cases.
+| Test class | Cases per input | Total cases |
+|---|---:|---:|
+| No error | 1 | 16 |
+| Single-bit error | 8 | 128 |
+| Double-bit error | 28 | 448 |
+| **Total** | **37** | **592** |
 
-The testbench therefore evaluates every possible pair of 8-bit reference and received values for every possible 4-bit threshold.
+The testbench uses a behavioral reference encoder and checks the corrected codeword and the decoder status flags. It expects the original codeword to be preserved when no error is injected, corrected after any single-bit error, and marked invalid when a double-bit error is detected.
 
-A `10 ns` delay is introduced after each input assignment to allow the combinational logic to settle before checking the outputs.
-
-For each test case, the reference model computes:
-
-For each test case, the reference model computes the expected error pattern from the XOR of the reference and received values, counts the set bits to obtain the expected error distance, checks whether the two inputs match, and checks whether the error distance is within the threshold.
-
-Any mismatch causes the testbench to print detailed error information including the input values, expected outputs, and actual DUT outputs.
-
-After all test cases are completed, the testbench reports the total number of tests and detected errors and produces a pass/fail verdict before terminating with `$finish`.
+The simulation should be considered verified only after the testbench completes with zero failures and reports `ALL WRAPPER TESTS PASSED`. The testbench does not exhaustively verify all possible error masks; its coverage is limited to no-error, single-bit-error, and double-bit-error cases.
 
 ## Synthesis Results
 
-The synthesized implementation produced the following resource usage:
+The reported synthesis results for the SECDED design are:
 
-| Resource | Utilization |
+| Resource | Utilization | Available | Utilization |
+|---|---:|---:|---:|
+| Lookup tables (LUTs) | 44 | 20,800 | 0.21% |
+| Flip-flops (FFs) | 19 | 41,600 | 0.05% |
+| Block RAM (BRAM) | 0 | — | 0% |
+| DSP slices | 0 | — | 0% |
+| I/O | 41 | 106 | 38.68% |
+
+The LUT and flip-flop percentages are specific to the target FPGA device and synthesis configuration.
+
+### Flip-Flop Breakdown
+
+All 19 reported flip-flops belong to the display controller:
+
+| State element | Width |
 |---|---:|
-| LUTs | 36 |
-| Flip-Flops | 35 |
-| BRAMs | 0 |
-| DSPs | 0 |
-| I/O pins | 42 |
-| LUT/FF utilization | < 1% |
+| Display refresh counter | 17 bits |
+| Active-display selector | 2 bits |
+| **Total** | **19 bits** |
 
-### Flip-Flop breakdown
+The SECDED datapath itself is combinational and does not require additional state elements.
 
-The 35 flip-flops are attributed to:
+### Resource Interpretation
 
-The 35 flip-flops consist of 8 for `reference_data`, 8 for `received_data`, 17 for the display refresh counter, and 2 for `active_display`, for a total of 35.
+The design uses a small number of LUTs and flip-flops because its main datapath consists of Boolean logic, parity calculations, population counting, comparisons, and correction-mask logic.
 
-The design uses no block RAM or DSP resources, as the datapath consists of Boolean logic, adders, comparators, multiplexers, and display-control logic rather than memory or multiplication hardware.
+No block RAM or DSP resources are reported. The I/O utilization is higher than the LUT and flip-flop percentages because the design connects to the board's switches, LEDs, clock, and seven-segment display.
 
-## Synthesized Architecture
-
-The synthesized design preserves the hierarchical organization of the RTL.
-
-The implementation can be divided into three major regions:
-
-1. **Data capture logic** — two multiplexer structures feeding the two 8-bit data registers.
-2. **Hamming-distance datapath** — combinational logic implementing XOR, population counting, equality comparison, and threshold comparison.
-3. **Display controller** — sequential refresh logic together with digit-selection, segment decoding, and anode-control logic.
-
-The central Hamming-distance engine remains combinational, while the operand capture registers and display controller provide the sequential state required by the FPGA implementation.
-
-The synthesis results reported no inferred latches or unconstrained-port warnings, and the reported resource counts correspond to the intended RTL structure.
+These values describe the reported synthesis result; they should not be interpreted as a substitute for timing analysis or post-implementation resource reports.
 
 ## Hardware Demonstration
 
-The completed design was synthesized and implemented on a Digilent Basys 3 FPGA board.
+The project targets the Digilent Basys 3 FPGA board. The hardware interface allows the input data and error mask to be configured using switches, with the corrected codeword and decoder status displayed through LEDs. The input, output, syndrome, and error weight are presented on the seven-segment display.
 
-The hardware demonstration provides physical verification that the RTL design, FPGA constraints, synthesis/implementation flow, and board-level I/O operate together as intended.
+A board photograph is useful as a visual record of the hardware setup, but the photograph alone does not establish that every error case has been verified. Simulation and implementation reports provide complementary evidence.
 
-## Hardware Security and Data-Integrity Relevance
+## Hardware Integrity and Security Relevance
 
-The implemented circuit is a **Hamming-distance and threshold-comparison primitive**, rather than a complete cryptographic, authentication, or error-correcting-code system.
+The project demonstrates hardware error-control and integrity-monitoring techniques.
 
-Its core operation is useful in systems that need to measure and bound bit-level deviations between two binary values.
+SECDED coding is useful in systems where data corruption must be detected and, for a single-bit error, corrected. The Hamming-distance monitor separately measures how many bits differ between the transmitted and received codewords.
 
 Potential application areas include:
 
-- bit-level data-integrity monitoring
-- corrupted-data or packet-deviation detection
-- threshold-based fault tolerance
-- hardware-response similarity checking
-- PUF-oriented response comparison
-- hardware authentication pipelines
+- Memory and data-path error-control concepts
+- Bit-level data-integrity monitoring
+- Fault injection and error-classification experiments
+- Threshold-based comparison of binary responses
+- Hardware systems that need to detect or correct limited bit corruption
 
-In a PUF-oriented system, for example, the Hamming-distance engine could be used as a hardware primitive for comparing a measured response against a reference response and determining whether the deviation falls within an acceptable threshold. The present project does **not** implement a PUF or an authentication protocol itself.
+The project does not implement a complete cryptographic protocol, physical unclonable function (PUF), or hardware authentication system. Those applications would require additional system-level design and security analysis.
 
 ## Project Artifacts
 
-The repository contains the RTL implementation, verification environment, FPGA constraints, implementation artifacts, and supporting documentation.
+The repository contains:
 
-The original course-submission report has been replaced by this project-focused document so that the repository describes the engineering work directly rather than presenting it as a laboratory submission.
+- Verilog RTL modules under `src/`
+- SECDED wrapper testbench under `simulation/`
+- Simulation images under `simulation/images/`
+- Basys 3 pin constraints under `constraints/`
+- FPGA implementation artifacts under `bitstream/`
+- Synthesis results, diagrams, and this technical report under `results/`
+
+The README provides a shorter project overview and links to the detailed technical report.
 
 ## Project Status
 
-The hardware design and FPGA implementation are complete.
+The RTL has been extended from a Hamming-distance and threshold-comparison engine to an integrated SECDED encoding, error-injection, decoding, and monitoring system.
 
-The repository is being organized as a reproducible portfolio artifact containing:
-
-- modular Verilog RTL
-- exhaustive simulation/testbench
-- Basys 3 FPGA constraints
-- generated bitstream
-- synthesis and hardware results
-- architectural documentation
+The remaining validation steps are to confirm that the current testbench passes in simulation, ensure the implementation and timing reports correspond to the current `secded_wrapper` top module, and keep the documented images and resource counts aligned with the generated artifacts.
